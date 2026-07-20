@@ -1,0 +1,85 @@
+; Forge Solo — single-exe Windows installer. Bundles the launcher, stratum/api services,
+; BCH2 + 1175 nodes, portable PostgreSQL, and the dashboard. Per-user install (no admin).
+#define MyAppName "Forge Solo"
+#define MyAppVersion "1.0.4"
+#define MyAppPublisher "BCH2 Team"
+#define MyAppURL "https://github.com/BitcoincashII/forge-solo"
+#define MyAppExe "forge-solo.exe"
+
+[Setup]
+AppId={{9F2C7A31-4B6E-4D8A-9C1F-3E5A7B0D2C64}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}/issues
+DefaultDirName={localappdata}\Programs\ForgeSolo
+DisableProgramGroupPage=yes
+DisableDirPage=yes
+PrivilegesRequired=lowest
+OutputDir=.
+OutputBaseFilename=ForgeSolo-Setup-{#MyAppVersion}
+Compression=lzma2/max
+SolidCompression=yes
+WizardStyle=modern
+SetupIconFile=forge-solo.ico
+UninstallDisplayIcon={app}\{#MyAppExe}
+UninstallDisplayName={#MyAppName}
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
+
+[Files]
+Source: "bin\*"; DestDir: "{app}"; Flags: ignoreversion
+Source: "init-db.sql"; DestDir: "{app}"; Flags: ignoreversion
+Source: "pgsql\*"; DestDir: "{app}\pgsql"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "web\*"; DestDir: "{app}\web"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{userprograms}\Forge Solo"; Filename: "{app}\{#MyAppExe}"
+Name: "{userprograms}\Uninstall Forge Solo"; Filename: "{uninstallexe}"
+Name: "{userdesktop}\Forge Solo"; Filename: "{app}\{#MyAppExe}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#MyAppExe}"; Description: "Launch Forge Solo now"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// One elevated step (a single UAC prompt) at install:
+//  - inbound TCP 3333  : a LAN Bitaxe/ASIC can reach the miner (private/domain only)
+//  - inbound TCP 8333  : the BCH2 node accepts incoming peers (any profile)
+//  - inbound TCP 25360 : the 1175 node accepts incoming peers (any profile)
+//  - Defender exclusion for the data folder so it stops rescanning the blockchain/DB on
+//    every write — the main cause of disk thrash / freezes on a laptop.
+// Mining from THIS PC (127.0.0.1:3333) needs no rule at all.
+procedure CurStepChanged(CurStep: TSetupStep);
+var ResultCode: Integer; DataDir, Cmd: String;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    DataDir := ExpandConstant('{userappdata}\ForgeSolo');
+    Cmd := '/c ' +
+      'netsh advfirewall firewall delete rule name="Forge Solo Miner (3333)" >nul 2>&1 & ' +
+      'netsh advfirewall firewall add rule name="Forge Solo Miner (3333)" dir=in action=allow protocol=TCP localport=3333 profile=private,domain & ' +
+      'netsh advfirewall firewall delete rule name="Forge Solo BCH2 P2P (8333)" >nul 2>&1 & ' +
+      'netsh advfirewall firewall add rule name="Forge Solo BCH2 P2P (8333)" dir=in action=allow protocol=TCP localport=8333 profile=any & ' +
+      'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath ''' + DataDir + ''' -ErrorAction SilentlyContinue"';
+    ShellExec('runas', ExpandConstant('{cmd}'), Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var ResultCode: Integer; DataDir, Cmd: String;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    DataDir := ExpandConstant('{userappdata}\ForgeSolo');
+    Cmd := '/c ' +
+      'netsh advfirewall firewall delete rule name="Forge Solo Miner (3333)" & ' +
+      'netsh advfirewall firewall delete rule name="Forge Solo BCH2 P2P (8333)" & ' +
+      'powershell -NoProfile -Command "Remove-MpPreference -ExclusionPath ''' + DataDir + ''' -ErrorAction SilentlyContinue"';
+    ShellExec('runas', ExpandConstant('{cmd}'), Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;

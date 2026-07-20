@@ -1,0 +1,284 @@
+package main
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"fyne.io/systray"
+)
+
+func pgbin(name string) string { return ipath("pgsql", "bin", name) }
+
+func setupSecrets() {
+	f := dpath("secrets.env")
+	if b, err := os.ReadFile(f); err == nil {
+		// crude parse KEY=VAL lines
+		for _, line := range splitLines(string(b)) {
+			k, v := cut(line, '=')
+			switch k {
+			case "BCH2":
+				sec.BCH2Pass = v
+			case "AUX":
+				sec.AuxPass = v
+			case "DB":
+				sec.DBPass = v
+			case "TOKEN":
+				sec.Token = v
+			}
+		}
+	}
+	if sec.BCH2Pass == "" {
+		sec = secrets{BCH2Pass: gen(), AuxPass: gen(), DBPass: gen(), Token: gen()}
+		_ = os.WriteFile(f, []byte("BCH2="+sec.BCH2Pass+"\nAUX="+sec.AuxPass+"\nDB="+sec.DBPass+"\nTOKEN="+sec.Token+"\n"), 0o600)
+	}
+}
+
+func writeConfigs() {
+	md(dpath("bch2"))
+	md(dpath("elevenseventyfive"))
+	// listen + upnp/natpmp/discover so the node accepts incoming peers (router permitting);
+	// dbcache/par/maxconnections keep it light on a laptop. writeAlways so upgrades apply.
+	writeAlways(dpath("bch2", "bch2.conf"),
+		"server=1\nlisten=1\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\nrpcport="+bch2RPC+
+			"\nrpcuser=forge\nrpcpassword="+sec.BCH2Pass+"\nport="+bch2P2P+"\nprune=2000\n"+
+			"upnp=1\nnatpmp=1\ndiscover=1\ndbcache=300\npar=1\nmaxconnections=40\n"+
+			"zmqpubhashblock=tcp://127.0.0.1:"+bch2ZMQ+"\nzmqpubrawblock=tcp://127.0.0.1:"+bch2ZMQ+"\ndnsseed=1\n")
+	writeAlways(dpath("elevenseventyfive", "1175.conf"),
+		"server=1\nlisten=1\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\nrpcport="+aux1175RPC+
+			"\nrpcuser=forge1175\nrpcpassword="+sec.AuxPass+"\nport="+aux1175P2P+"\nprune=2000\n"+
+			"upnp=1\nnatpmp=1\ndiscover=1\ndbcache=300\npar=1\nmaxconnections=40\ndnsseed=1\n"+
+			"addnode=213.181.112.83\naddnode=46.7.7.113\naddnode=93.127.117.218\n")
+	// writeAlways so a port change (e.g. moving the 1175 RPC off a Windows-blocked port)
+	// propagates to the stratum's merge-mining config on upgrade. Fully generated file.
+	writeAlways(dpath("config.yaml"), configYAML())
+}
+
+func configYAML() string {
+	return `pool:
+  name: "Forge Solo"
+  coin: "Bitcoin Cash II"
+  coin_symbol: "BCH2"
+  address: ""
+  solo_fee: 0.0
+  block_reward: 50.0
+  halving_interval: 210000
+  payout_scheme: "solo"
+  min_payout: 1.0
+  payout_interval: "1h"
+  coinbase_tag: "Forge Solo"
+stratum:
+  host: "0.0.0.0"
+  port: ` + minerPort + `
+  max_connections: 256
+  ban_duration: "10m"
+  max_shares_per_second: 100
+  extranonce1_size: 2
+  extranonce2_size: 8
+  vardiff:
+    enabled: true
+    min_diff: 1024
+    max_diff: 1000000000000
+    target_time: 10
+    retarget_time: 30
+    variance_percent: 25
+stratum_braiins:
+  enabled: false
+stratumv2:
+  enabled: false
+node:
+  host: "127.0.0.1"
+  port: ` + bch2RPC + `
+  use_ssl: false
+  zmq_endpoint: "tcp://127.0.0.1:` + bch2ZMQ + `"
+mergemining:
+  enabled: true
+  payout_address: ""
+  min_payout: 1.0
+  aux_node:
+    host: "127.0.0.1"
+    port: ` + aux1175RPC + `
+    user: "forge1175"
+    pass: "` + sec.AuxPass + `"
+    wallet: "pool"
+logging:
+  level: "info"
+  format: "json"
+`
+}
+
+func startPostgres() bool {
+	pgdata := dpath("pgdata")
+	if _, err := os.Stat(filepath.Join(pgdata, "PG_VERSION")); os.IsNotExist(err) {
+		md(pgdata)
+		pwf := dpath("pgpw.txt")
+		_ = os.WriteFile(pwf, []byte(sec.DBPass), 0o600)
+		init := hiddenPrio(belowNormal, "pgsql\\bin\\initdb.exe", "-D", pgdata, "-U", "forge", "-A", "scram-sha-256",
+			"--pwfile", pwf, "-E", "UTF8", "--no-locale")
+		_ = init.Run()
+		_ = os.Remove(pwf)
+	}
+	log := dpath("pglog.txt")
+	pgctl := hiddenPrio(belowNormal, "pgsql\\bin\\pg_ctl.exe", "-D", pgdata, "-l", log, "-o", "-p "+pgPort+" -h 127.0.0.1", "-w", "start")
+	_ = pgctl.Run()
+	if !waitTCP("127.0.0.1:"+pgPort, 60*time.Second) {
+		return false
+	}
+	env := append(os.Environ(), "PGPASSWORD="+sec.DBPass)
+	// create the database (ignore "already exists")
+	cdb := hidden("pgsql\\bin\\createdb.exe", "-h", "127.0.0.1", "-p", pgPort, "-U", "forge", "forgesolo")
+	cdb.Env = env
+	_ = cdb.Run()
+	// load the schema (idempotent; init-db.sql uses IF NOT EXISTS)
+	psql := hidden("pgsql\\bin\\psql.exe", "-h", "127.0.0.1", "-p", pgPort, "-U", "forge", "-d", "forgesolo", "-f", ipath("init-db.sql"))
+	psql.Env = env
+	_ = psql.Run()
+	return true
+}
+
+func dbEnv() []string {
+	return []string{
+		"DB_HOST=127.0.0.1", "DB_PORT=" + pgPort, "DB_USER=forge",
+		"DB_PASSWORD=" + sec.DBPass, "DB_NAME=forgesolo", "DB_SSLMODE=disable",
+	}
+}
+
+func startNodes() {
+	_ = run("bch2", hiddenPrio(belowNormal, "bitcoincashIId.exe", "-datadir="+dpath("bch2"), "-conf="+dpath("bch2", "bch2.conf")))
+	_ = run("aux1175", hiddenPrio(belowNormal, "elevenseventyfived.exe", "-datadir="+dpath("elevenseventyfive"), "-conf="+dpath("elevenseventyfive", "1175.conf")))
+}
+
+func startStratum() {
+	c := hidden("stratum.exe", "-config", dpath("config.yaml"))
+	c.Env = append(append(os.Environ(), dbEnv()...),
+		"INTERNAL_API_TOKEN="+sec.Token, "API_HOST=127.0.0.1", "API_PORT="+stratumInt,
+		"RPC_USER=forge", "RPC_PASSWORD="+sec.BCH2Pass, "HOME_APP=1")
+	_ = run("stratum", c)
+}
+
+func startAPI() {
+	c := hidden("api.exe")
+	c.Dir = dataDir // so its relative config.yaml + the dashboard's edits share one file
+	c.Env = append(append(os.Environ(), dbEnv()...),
+		"RPC_URL=http://127.0.0.1:"+bch2RPC, "RPC_USER=forge", "RPC_PASSWORD="+sec.BCH2Pass,
+		"STRATUM_INTERNAL_URL=http://127.0.0.1:"+stratumInt, "INTERNAL_API_TOKEN="+sec.Token,
+		"API_HOST=127.0.0.1", "API_PORT="+apiPort, "API_LISTEN_PORT="+apiPort, "HOME_APP=1", "CORS_ORIGINS=",
+		"AUX1175_URL=http://127.0.0.1:"+aux1175RPC, "AUX1175_USER=forge1175", "AUX1175_PASSWORD="+sec.AuxPass)
+	_ = run("api", c)
+}
+
+func restartMiner() {
+	systray.SetTooltip("Forge Solo — restarting miner…")
+	stop("stratum")
+	time.Sleep(2 * time.Second)
+	startStratum()
+	systray.SetTooltip("Forge Solo — mining")
+}
+
+func boot() {
+	systray.SetTooltip("Forge Solo — preparing…")
+	setupSecrets()
+	writeConfigs()
+	systray.SetTooltip("Forge Solo — starting database…")
+	if !startPostgres() {
+		systray.SetTooltip("Forge Solo — DATABASE FAILED (see Data Folder\\pglog.txt)")
+		return
+	}
+	systray.SetTooltip("Forge Solo — starting nodes (first sync can take a while)…")
+	startNodes()
+
+	// The API + dashboard don't need the node's RPC to start (handlers call it lazily and
+	// report "offline"/"syncing" on their own), so bring them up right away. The browser
+	// opens in seconds and the dashboard's status banner shows live sync progress, instead
+	// of the whole UI waiting on the nodes first.
+	startAPI()
+	waitTCP("127.0.0.1:"+apiPort, 60*time.Second)
+	go serveDashboard()
+	waitTCP("127.0.0.1:"+webPort, 20*time.Second)
+	systray.SetTooltip("Forge Solo — set your payout address in the dashboard")
+	openBrowser("http://127.0.0.1:" + webPort)
+
+	// Start the miner once the node RPC is answering (stratum needs block templates).
+	go func() {
+		waitTCP("127.0.0.1:"+bch2RPC, 600*time.Second)
+		waitTCP("127.0.0.1:"+aux1175RPC, 120*time.Second) // best-effort (merge-mining)
+		startStratum()
+		systray.SetTooltip("Forge Solo — running")
+	}()
+}
+
+// rpcStop asks a node to shut down via its RPC `stop` method so it FLUSHES the chainstate to
+// disk before exiting. A hard kill loses the in-memory (dbcache) chainstate on this small chain
+// and forces a full resync on the next launch.
+func rpcStop(port, user, pass string) {
+	req, err := http.NewRequest("POST", "http://127.0.0.1:"+port+"/",
+		strings.NewReader(`{"jsonrpc":"1.0","id":"quit","method":"stop","params":[]}`))
+	if err != nil {
+		return
+	}
+	req.SetBasicAuth(user, pass)
+	c := &http.Client{Timeout: 5 * time.Second}
+	if resp, err := c.Do(req); err == nil {
+		_ = resp.Body.Close()
+	}
+}
+
+// waitProcExit blocks until the tracked process exits, or the timeout elapses.
+func waitProcExit(key string, timeout time.Duration) {
+	mu.Lock()
+	c := procs[key]
+	mu.Unlock()
+	if c == nil || c.Process == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() { _, _ = c.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+}
+
+func shutdown() {
+	systray.SetTooltip("Forge Solo — shutting down cleanly…")
+	stop("stratum") // miner + api first (they talk to the nodes)
+	stop("api")
+	// Flush + stop the nodes gracefully so the next launch RESUMES instead of resyncing.
+	rpcStop(bch2RPC, "forge", sec.BCH2Pass)
+	rpcStop(aux1175RPC, "forge1175", sec.AuxPass)
+	waitProcExit("bch2", 45*time.Second)
+	waitProcExit("aux1175", 20*time.Second)
+	stop("bch2") // force-kill only if a node ignored the grace period
+	stop("aux1175")
+	pgctl := hidden("pgsql\\bin\\pg_ctl.exe", "-D", dpath("pgdata"), "-m", "fast", "stop")
+	_ = pgctl.Run()
+	os.Exit(0)
+}
+
+// small helpers to avoid extra imports
+func splitLines(s string) []string {
+	var out, cur = []string{}, ""
+	for _, r := range s {
+		if r == '\n' {
+			out = append(out, cur)
+			cur = ""
+		} else if r != '\r' {
+			cur += string(r)
+		}
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
+func cut(s string, sep byte) (string, string) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == sep {
+			return s[:i], s[i+1:]
+		}
+	}
+	return s, ""
+}
+
