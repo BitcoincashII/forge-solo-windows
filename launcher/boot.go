@@ -57,34 +57,34 @@ func writeConfigs() {
 }
 
 func configYAML() string {
+	// Mirrors the app's docker/stratum/config.template.yaml (the tested, shipped config).
+	// Keep the two in step: keys the stratum does not read are silently ignored, so a stale
+	// key here looks configured but does nothing.
 	return `pool:
   name: "Forge Solo"
   coin: "Bitcoin Cash II"
   coin_symbol: "BCH2"
   address: ""
-  solo_fee: 0.0
   block_reward: 50.0
-  halving_interval: 210000
   payout_scheme: "solo"
-  min_payout: 1.0
-  payout_interval: "1h"
   coinbase_tag: "Forge Solo"
 stratum:
   host: "0.0.0.0"
   port: ` + minerPort + `
   max_connections: 256
-  ban_duration: "10m"
   max_shares_per_second: 100
-  extranonce1_size: 2
+  extranonce1_size: 4
   extranonce2_size: 8
   vardiff:
     enabled: true
     min_diff: 1024
     max_diff: 1000000000000
-    target_time: 10
-    retarget_time: 30
+    target_time: 5
+    retarget_time: 10
     variance_percent: 25
-stratum_braiins:
+# NiceHash / MiningRigRentals put a whole order behind one connection on 3335. Off here:
+# the installer opens no rule for that port, so a home box would bind what nothing reaches.
+stratum_rental:
   enabled: false
 stratumv2:
   enabled: false
@@ -96,7 +96,6 @@ node:
 mergemining:
   enabled: true
   payout_address: ""
-  min_payout: 1.0
   aux_node:
     host: "127.0.0.1"
     port: ` + aux1175RPC + `
@@ -153,7 +152,11 @@ func startNodes() {
 func startStratum() {
 	c := hidden("stratum.exe", "-config", dpath("config.yaml"))
 	c.Env = append(append(os.Environ(), dbEnv()...),
-		"INTERNAL_API_TOKEN="+sec.Token, "API_HOST=127.0.0.1", "API_PORT="+stratumInt,
+		// API_PORT points the stratum at api.exe for miner-settings lookups; INTERNAL_STATS_PORT
+		// is the stratum's own stats listener that api.exe polls via STRATUM_INTERNAL_URL. Two
+		// different services -- swapping them silently zeroes every stratum-sourced dashboard tile.
+		"INTERNAL_API_TOKEN="+sec.Token, "API_HOST=127.0.0.1", "API_PORT="+apiPort,
+		"INTERNAL_STATS_HOST=127.0.0.1", "INTERNAL_STATS_PORT="+stratumInt,
 		"RPC_USER=forge", "RPC_PASSWORD="+sec.BCH2Pass, "HOME_APP=1")
 	_ = run("stratum", c)
 }
@@ -281,4 +284,3 @@ func cut(s string, sep byte) (string, string) {
 	}
 	return s, ""
 }
-

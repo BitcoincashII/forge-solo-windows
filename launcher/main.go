@@ -29,9 +29,10 @@ var trayIcon []byte
 
 // Fixed, user-facing / internet-facing ports (matched by the installer's firewall rules).
 const (
-	minerPort = "3333" // documented miner endpoint — fixed so users always point miners here
-	webPort   = "3080" // dashboard URL — fixed so it stays stable across launches
-	bch2P2P   = "8333" // BCH2 P2P (incoming peers) — fixed so the installer firewall rule matches
+	minerPort  = "3333"  // documented miner endpoint — fixed so users always point miners here
+	webPort    = "3080"  // dashboard URL — fixed so it stays stable across launches
+	bch2P2P    = "8339"  // BCH2 P2P (incoming peers) — fixed so the installer firewall rule matches
+	aux1175P2P = "25360" // 1175 P2P (incoming peers) — likewise fixed; listen=1 needs a reachable port
 )
 
 // Loopback-only service ports. Chosen dynamically at startup (pickPort) so they can NEVER
@@ -44,7 +45,6 @@ var (
 	bch2RPC    = "8332"
 	bch2ZMQ    = "28332"
 	aux1175RPC = "25361"
-	aux1175P2P = "25360"
 	stratumInt = "3337"
 	apiPort    = "8080"
 )
@@ -61,8 +61,8 @@ type secrets struct {
 	BCH2Pass, AuxPass, DBPass, Token string
 }
 
-func gen() string    { b := make([]byte, 24); _, _ = rand.Read(b); return hex.EncodeToString(b) }
-func md(p string)    { _ = os.MkdirAll(p, 0o755) }
+func gen() string              { b := make([]byte, 24); _, _ = rand.Read(b); return hex.EncodeToString(b) }
+func md(p string)              { _ = os.MkdirAll(p, 0o755) }
 func dpath(e ...string) string { return filepath.Join(append([]string{dataDir}, e...)...) }
 func ipath(e ...string) string { return filepath.Join(append([]string{installDir}, e...)...) }
 
@@ -142,7 +142,6 @@ func main() {
 	bch2RPC = pickPort(30300)
 	bch2ZMQ = pickPort(30600)
 	aux1175RPC = pickPort(30900)
-	aux1175P2P = pickPort(31200)
 	stratumInt = pickPort(31500)
 	apiPort = pickPort(31800)
 	systray.Run(onReady, func() { shutdown() })

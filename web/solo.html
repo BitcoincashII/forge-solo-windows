@@ -6,7 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Forge Solo BCH2 Mining">
     <title>Forge Solo</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- No webfont fetch: an Umbrel with no outbound access hung/fell back here while
+         settings.html (which never fetched one) rendered fine, so the two pages disagreed. -->
     <link rel="stylesheet" href="/css/common.css">
     <script src="/js/chart.min.js"></script>
     <style>
@@ -65,7 +66,12 @@
 
         .chart-container{height:200px;position:relative}
 
-        .table-scroll{max-height:300px;overflow-y:auto}
+        /* overflow-x too: a grid child defaults to min-width:auto, so a wide table forced
+           the whole page to ~604px and pushed the Time/Status/Payout columns off a phone
+           screen instead of scrolling inside its own box. */
+        .table-scroll{max-height:300px;overflow-y:auto;overflow-x:auto}
+        .stats-row>*,.main-grid>*,.effort-stats>*{min-width:0}
+        .card{min-width:0}
         .blocks-table{width:100%;border-collapse:collapse}
         .blocks-table th,.blocks-table td{padding:10px;text-align:left;border-bottom:1px solid var(--border);font-size:13px}
         .blocks-table th{color:var(--text-secondary);font-weight:500;font-size:11px;text-transform:uppercase}
@@ -81,6 +87,8 @@
         }
         @media(max-width:600px){
             .stats-row{grid-template-columns:repeat(2,1fr)}
+            .effort-stats{grid-template-columns:repeat(2,1fr)}
+            body,.container{overflow-x:hidden}
             .miner-header h1{font-size:22px}
             .balance-card{flex-direction:column;text-align:center}
             .balance-right{text-align:center}
@@ -91,7 +99,7 @@
     <a href="#main-content" class="skip-link" data-i18n="p_skip_to_content">Skip to main content</a>
 
     <div id="offlineBanner" class="offline-banner" style="display:none" role="alert">
-        <span data-i18n="p_offline_banner">You are offline. Some data may be outdated.</span>
+        <span data-i18n="p_offline_banner">This device has lost its network connection — the numbers below may be out of date. Your miner and node are unaffected.</span>
     </div>
 
     <header>
@@ -120,9 +128,10 @@
 
             <div class="balance-card" role="region" aria-label="Balance information">
                 <div class="balance-info">
-                    <h2 data-i18n="p_solo_mature_balance">Mature Balance</h2>
+                    <h2 data-i18n="p_solo_mature_balance">Matured (spendable)</h2>
                     <div class="balance-amount"><span id="matureBalance">0.00</span> <small>BCH2</small></div>
-                    <div class="balance-sub">Immature: <span id="immatureBalance">0.00</span> BCH2 (waiting 100 confirms)</div>
+                    <div class="balance-sub">Still maturing: <span id="immatureBalance">0.00</span> BCH2 (spendable 100 blocks after the one that paid it)</div>
+                    <div class="balance-sub" style="opacity:0.75">Already paid to your address by each block's coinbase — this app holds nothing.</div>
                 </div>
                 <div class="balance-right">
                     <div class="blocks-found" id="blocksFound">0</div>
@@ -154,11 +163,11 @@
                 </div>
                 <div class="stat-tile">
                     <div class="stat-value" id="validShares">--</div>
-                    <div class="stat-label" data-i18n="p_solo_valid_shares">Valid Shares</div>
+                    <div class="stat-label" data-i18n="p_solo_valid_shares" title="Counted by the mining service since it last started. An app update or reboot resets it; your blocks and balances are stored and are not affected.">Valid Shares <span style="opacity:.6;font-weight:400">(since restart)</span></div>
                 </div>
                 <div class="stat-tile">
                     <div class="stat-value" id="rejectRate">0%</div>
-                    <div class="stat-label" data-i18n="p_solo_reject_pct">Reject %</div>
+                    <div class="stat-label" data-i18n="p_solo_reject_pct" title="Counted by the mining service since it last started. An app update or reboot resets it; your blocks and balances are stored and are not affected.">Reject % <span style="opacity:.6;font-weight:400">(since restart)</span></div>
                 </div>
             </div>
 
@@ -204,7 +213,7 @@
                     <h2 data-i18n="p_solo_workers_title">Workers</h2>
                     <div class="table-scroll" id="workersContainer">
                         <table class="workers-table" aria-describedby="workers-desc">
-                            <caption id="workers-desc" class="sr-only">List of connected mining workers</caption>
+                            <caption id="workers-desc" class="sr-only">Mining workers seen this session. Workers that are not currently connected are marked offline.</caption>
                             <thead>
                                 <tr>
                                     <th scope="col" data-i18n="p_solo_th_worker">Worker</th>
@@ -212,7 +221,7 @@
                                     <th scope="col" data-i18n="p_solo_th_5m_hash">5m Hash</th>
                                     <th scope="col" data-i18n="p_solo_th_60m_hash">60m Hash</th>
                                     <th scope="col" data-i18n="p_solo_th_round_best">Round Best</th>
-                                    <th scope="col" data-i18n="p_solo_th_ath_diff">ATH Diff</th>
+                                    <th scope="col" data-i18n="p_solo_th_ath_diff" title="Counted by the mining service since it last started. An app update or reboot resets it; your blocks and balances are stored and are not affected.">Best Diff (since restart)</th>
                                 </tr>
                             </thead>
                             <tbody id="workersTable">
@@ -234,7 +243,7 @@
                 <div class="card">
                     <h2 data-i18n="p_solo_your_blocks">Your Blocks Found</h2>
                     <div style="margin-bottom:12px;padding:10px 14px;background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:8px;font-size:12px;color:var(--text-secondary)">
-                        <strong style="color:var(--gold)">Note:</strong> In solo mode the full block reward is paid <strong>on-chain directly by the coinbase</strong> to your configured BCH2 payout address — there is no separate payout transaction. Rewards become spendable after <strong>100 confirmations</strong> (the block then shows "Confirmed").
+                        <strong style="color:var(--gold)">Note:</strong> In solo mode the full block reward is paid <strong>on-chain directly by the coinbase</strong> to your configured BCH2 payout address — there is no separate payout transaction. Rewards become spendable once <strong>100 more blocks</strong> have been mined on top of the block that paid them (the block then shows "Confirmed"). Your wallet will show that as 101 confirmations.
                     </div>
                     <div class="table-scroll" id="blocksContainer">
                         <table class="blocks-table">
@@ -287,6 +296,6 @@
     </footer>
 
     <script src="/js/common.js"></script>
-    <script src="/js/pool-solo-inline.js?v=20260817"></script>
+    <script src="/js/pool-solo-inline.js?v=20260824c"></script>
 </body>
 </html>

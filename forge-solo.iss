@@ -1,7 +1,7 @@
 ; Forge Solo — single-exe Windows installer. Bundles the launcher, stratum/api services,
 ; BCH2 + 1175 nodes, portable PostgreSQL, and the dashboard. Per-user install (no admin).
 #define MyAppName "Forge Solo"
-#define MyAppVersion "1.0.8"
+#define MyAppVersion "1.0.9"
 #define MyAppPublisher "BCH2 Team"
 #define MyAppURL "https://github.com/BitcoincashII/forge-solo"
 #define MyAppExe "forge-solo.exe"
@@ -49,7 +49,7 @@ Filename: "{app}\{#MyAppExe}"; Description: "Launch Forge Solo now"; Flags: nowa
 [Code]
 // One elevated step (a single UAC prompt) at install:
 //  - inbound TCP 3333  : a LAN Bitaxe/ASIC can reach the miner (private/domain only)
-//  - inbound TCP 8333  : the BCH2 node accepts incoming peers (any profile)
+//  - inbound TCP 8339  : the BCH2 node accepts incoming peers (any profile)
 //  - inbound TCP 25360 : the 1175 node accepts incoming peers (any profile)
 //  - Defender exclusion for the data folder so it stops rescanning the blockchain/DB on
 //    every write — the main cause of disk thrash / freezes on a laptop.
@@ -64,7 +64,10 @@ begin
       'netsh advfirewall firewall delete rule name="Forge Solo Miner (3333)" >nul 2>&1 & ' +
       'netsh advfirewall firewall add rule name="Forge Solo Miner (3333)" dir=in action=allow protocol=TCP localport=3333 profile=private,domain & ' +
       'netsh advfirewall firewall delete rule name="Forge Solo BCH2 P2P (8333)" >nul 2>&1 & ' +
-      'netsh advfirewall firewall add rule name="Forge Solo BCH2 P2P (8333)" dir=in action=allow protocol=TCP localport=8333 profile=any & ' +
+      'netsh advfirewall firewall delete rule name="Forge Solo BCH2 P2P (8339)" >nul 2>&1 & ' +
+      'netsh advfirewall firewall add rule name="Forge Solo BCH2 P2P (8339)" dir=in action=allow protocol=TCP localport=8339 profile=any & ' +
+      'netsh advfirewall firewall delete rule name="Forge Solo 1175 P2P (25360)" >nul 2>&1 & ' +
+      'netsh advfirewall firewall add rule name="Forge Solo 1175 P2P (25360)" dir=in action=allow protocol=TCP localport=25360 profile=any & ' +
       'powershell -NoProfile -Command "Add-MpPreference -ExclusionPath ''' + DataDir + ''' -ErrorAction SilentlyContinue"';
     ShellExec('runas', ExpandConstant('{cmd}'), Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
@@ -78,7 +81,9 @@ begin
     DataDir := ExpandConstant('{userappdata}\ForgeSolo');
     Cmd := '/c ' +
       'netsh advfirewall firewall delete rule name="Forge Solo Miner (3333)" & ' +
+      'netsh advfirewall firewall delete rule name="Forge Solo BCH2 P2P (8339)" & ' +
       'netsh advfirewall firewall delete rule name="Forge Solo BCH2 P2P (8333)" & ' +
+      'netsh advfirewall firewall delete rule name="Forge Solo 1175 P2P (25360)" & ' +
       'powershell -NoProfile -Command "Remove-MpPreference -ExclusionPath ''' + DataDir + ''' -ErrorAction SilentlyContinue"';
     ShellExec('runas', ExpandConstant('{cmd}'), Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;

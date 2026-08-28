@@ -1,43 +1,91 @@
 # Forge Solo — Windows build
 
-Native Windows installer for **Forge Solo** (solo-mine BCH2 + merge-mine 1175 at home).
-Not Docker: a Go tray launcher orchestrates a bundled PostgreSQL, the BCH2 + 1175 nodes,
-and the stratum + api services, and serves the dashboard on `127.0.0.1`.
+Native Windows installer for **Forge Solo**: solo-mine BCH2 and merge-mine 1175 (ESF) from a
+home PC. A Go tray launcher orchestrates a bundled PostgreSQL, the BCH2 and 1175 nodes, and the
+stratum + api services, then serves the dashboard on `127.0.0.1:3080`.
+
+The installed product contains no Docker and no container runtime — everything ships as plain
+Windows executables. Docker appears only in the *build* instructions below, where it is used on
+a Linux build host to run Inno Setup; see [Build](#build).
+
+Solo means solo: the full block reward is paid **on-chain, directly by the coinbase** to your
+address. There is no pool wallet, no fee, and no minimum payout.
 
 ## Layout
 - `launcher/` — Go tray launcher/orchestrator (`main.go`, `boot.go`, `web.go`) + `forge-solo.ico`
-- `web/` — the dashboard (mirror of the app's `web/dist`)
+- `web/` — the dashboard, a verbatim mirror of the app's `web/dist`
 - `forge-solo.iss` — Inno Setup installer script
-- `init-db.sql` — Postgres schema
+- `init-db.sql` — initial Postgres schema (the services also create any missing tables at
+  startup with `CREATE TABLE IF NOT EXISTS`, so this file is a head start, not the whole schema)
 - *(not tracked)* `bin/` — compiled exes + prebuilt node binaries; `pgsql/` — portable PostgreSQL
+
+## Ports
+Fixed, because the installer's firewall rules and the miner URL you type must match:
+
+| Port | Purpose | Firewall rule |
+|---|---|---|
+| 3333 | stratum — point your ASIC/Bitaxe here | inbound, private+domain |
+| 3080 | dashboard (`http://127.0.0.1:3080`) | none — loopback only |
+| 8339 | BCH2 P2P (incoming peers) | inbound, any profile |
+| 25360 | 1175 P2P (incoming peers) | inbound, any profile |
+
+Mining from the same PC (`127.0.0.1:3333`) needs no firewall rule at all.
+
+Everything else — PostgreSQL, both node RPCs, ZMQ, the stratum's internal stats listener, and
+the api — binds a **dynamically chosen loopback port** (`pickPort`) so it can never collide with
+other software or land in a Windows reserved/excluded range. Those ports are picked in `main()`
+before anything binds, and every config and env var is regenerated from them on each launch.
 
 ## External binaries (place in `bin/` before building the installer)
 - `bitcoincashIId.exe` — BCH2 node (Windows release)
 - `elevenseventyfived.exe` — 1175 node (Windows release)
-- `stratum.exe`, `api.exe` — cross-compiled from the forge-solo app:
-  `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags '-s -w' -o stratum.exe ./cmd/stratum` (and `./cmd/api`)
-- `pgsql/` — a portable Windows PostgreSQL (EnterpriseDB zip), extracted at the repo root
+- `stratum.exe`, `api.exe` — cross-compiled from the forge-solo app (see Build step 1)
+- `pgsql/` — portable PostgreSQL **16.x**, extracted at the repo root so that
+  `pgsql\bin\postgres.exe` exists
+
+  Get the "Windows x86-64" binaries zip from
+  <https://www.enterprisedb.com/download-postgresql-binaries>. The currently bundled build is
+  **16.4**. Stay on 16.x: a PostgreSQL data directory is bound to its major version, so shipping
+  17.x would leave every existing install unable to start its database.
 
 ## Build
+Requires Go (for the three executables) and Docker (only to run Inno Setup, which has no native
+Linux build). Both `stratum.exe` and `api.exe` come from the app repo; the launcher is built here.
+
 ```sh
-# 1) exe icon resource (regenerate if the icon changes):
+# 1) app services, from a checkout of the forge-solo app at the release tag:
+cd /path/to/forge-solo
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags '-s -w' -o /path/to/forge-solo-windows/bin/stratum.exe ./cmd/stratum
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags '-s -w' -o /path/to/forge-solo-windows/bin/api.exe     ./cmd/api
+
+# 2) exe icon resource (regenerate only if the icon changes):
 cd launcher && rsrc -ico forge-solo.ico -arch amd64 -o rsrc.syso && cd ..
-# 2) launcher:
+
+# 3) launcher:
 cd launcher && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui -s -w" -o ../bin/forge-solo.exe . && cd ..
-# 3) installer (Inno Setup via Docker):
+
+# 4) installer — Inno Setup in a container, so this works on a Linux build host:
 docker run --rm -v "$PWD":/work amake/innosetup forge-solo.iss
 ```
 
+The installer is written to `ForgeSolo-Setup-<version>.exe`; the version lives in
+`forge-solo.iss` (`MyAppVersion`) and should track the app release the exes were built from.
+
 ## Design notes
-- **Dynamic ports** — internal loopback services (Postgres, both node RPCs, ZMQ, stratum-internal, api)
-  pick free ports at startup (`pickPort`) so they never collide with other software or Windows
-  reserved ranges. Fixed ports: miner `3333`, dashboard `3080`, BCH2 P2P `8333`.
-- **Graceful shutdown** — the launcher stops nodes via RPC `stop` (flush chainstate) before exit,
-  so a restart resumes instead of resyncing.
-- **Installer** — one elevated step adds a Defender exclusion for `%APPDATA%\ForgeSolo` and firewall
-  rules for the miner (3333) and BCH2 P2P (8333). Per-user install; no admin required for the copy.
-- Config/secrets live under `%APPDATA%\ForgeSolo`; the payout address is stored in the DB (set via Settings).
+- **Graceful shutdown** — the launcher stops both nodes via RPC `stop` so they flush the
+  chainstate before exit, and a restart resumes instead of resyncing.
+- **Installer** — one elevated step (a single UAC prompt) adds the firewall rules above and a
+  Defender exclusion for `%APPDATA%\ForgeSolo`, which otherwise gets rescanned on every
+  blockchain/DB write — the main cause of disk thrash on a laptop. The file copy itself is a
+  per-user install and needs no admin rights.
+- **Config and secrets** live under `%APPDATA%\ForgeSolo`. `config.yaml` is regenerated on every
+  launch (so port changes always take effect); it mirrors the app's
+  `docker/stratum/config.template.yaml`, and keys the stratum does not read are ignored silently,
+  so keep the two in step.
+- **Payout addresses** are stored in the database and set from the dashboard's Settings page,
+  never in a config file in the repo.
 
 ## Not yet done (pre public release)
-- Code signing (unsigned → SmartScreen warning)
-- Test matrix: Windows 10, varied hardware/antivirus
+- Code signing (unsigned → SmartScreen warning on first run)
+- Fresh-install test on a clean Windows 10 and Windows 11 box
+- Test matrix: varied hardware and antivirus products

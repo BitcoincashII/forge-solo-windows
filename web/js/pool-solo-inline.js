@@ -1,4 +1,31 @@
+        // Whether /api/v1/pool/config has ever answered. Without this the page cannot
+        // tell "you have not set a payout address" from "the API is down": minerAddress is
+        // only ever learned from that endpoint, and apiFetch throws on a non-OK response,
+        // so both arrive as an empty address. The app serves `web` from a separate nginx
+        // container with start-only depends_on while `api` waits on postgres health, so an
+        // unreachable API is the NORMAL view during startup, an update, or a crash-loop --
+        // and telling a correctly configured user to set an address they already set
+        // invites them to overwrite it from a Settings page that shows no error either.
+        let configReachable = false;
+
+        // Message for a table body or banner when we genuinely do not know the address.
+        function noAddressNotice(forTable) {
+            if (!configReachable) {
+                return "Can't reach Forge Solo — the numbers below aren't live yet. " +
+                       "If the app just started or updated, give it a minute.";
+            }
+            return forTable
+                ? 'Set your payout address in Settings to begin.'
+                : 'Set your payout address in Settings to mine.';
+        }
+
         let minerAddress = new URLSearchParams(window.location.search).get('address') || decodeURIComponent(window.location.pathname.split('/solo/')[1] || '');
+        // True when the address came from the URL rather than from this install's own
+        // configuration. The stratum's authorized count is process-wide, so it only
+        // describes the miner being viewed when that miner IS this install's payout
+        // address -- which is the normal case for a solo dashboard, but not when
+        // someone opens /solo?address=<someone else>.
+        const addressFromUrl = !!minerAddress;
         document.getElementById('minerAddress').textContent = minerAddress;
 
         document.getElementById('copyAddressBtn').addEventListener('click', function() {
@@ -10,6 +37,13 @@
         let networkDiff = 0;   // 0 until a real value arrives; last-good is then held across polls
         let nodeSynced = false;   // set by updateStatusBanner; gates network stats during IBD
         let minerHashing = false; // set by fetchMinerData; true once a worker is actually hashing
+        // Last /api/v1/mining-status payload and when it landed. The Workers tile needs the
+        // stratum's LIVE connection count: "online" in the miner payload means "submitted a
+        // share in the last 5 minutes", so an unplugged rig left the tile reading 1 for five
+        // minutes underneath a banner correctly saying no miner was connected -- two true
+        // statements that read as a contradiction on one screen.
+        let lastMiningStatus = null;
+        let lastMiningStatusAt = 0;
         let minerBlocksCount = 0;
         let currentHashrateTH = 0;   // latest 5m hashrate (TH/s), for the stable avg-effort estimate
 
@@ -48,6 +82,39 @@
             dash.insertBefore(b, dash.firstChild);
         })();
 
+        // The stratum address to tell the user to point a miner at. This page is served
+        // from the same host as the stratum, so its own hostname is the right answer --
+        // the old copy hardcoded "this PC: 127.0.0.1:3333 · a Bitaxe: your PC LAN IP",
+        // which is wrong for the Umbrel this app ships as, and disagreed with Settings
+        // and the README (both of which say <your-umbrel-ip>).
+        function stratumHostHint() {
+            var host = (window.location && window.location.hostname) || 'your-umbrel';
+            return '3333 (stratum+tcp://' + host + ':3333)';
+        }
+
+        // How many workers are attached RIGHT NOW.
+        //
+        // The stratum's authorized count is the live truth, but it is a process-wide figure,
+        // so it is only used when the page is showing this install's own payout address (no
+        // ?address= override). Falls back to the miner payload's recent-share count when the
+        // status is missing or stale, so a mining-status outage degrades rather than reading
+        // a confident zero.
+        const MINING_STATUS_MAX_AGE_MS = 30000;
+        function workersConnectedNow(data) {
+            const fresh = lastMiningStatus
+                && (Date.now() - lastMiningStatusAt) < MINING_STATUS_MAX_AGE_MS;
+            if (fresh && !addressFromUrl && lastMiningStatus.authorized != null) {
+                return Number(lastMiningStatus.authorized) || 0;
+            }
+            return Number((data && data.onlineWorkers) || 0);
+        }
+
+        function escapeHtml(v) {
+            return String(v == null ? '' : v).replace(/[&<>"']/g, function (ch) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+            });
+        }
+
         async function updateStatusBanner() {
             var el = document.getElementById('syncBanner');
             if (!el) return;
@@ -55,6 +122,7 @@
             if (!minerAddress) {
                 try {
                     const cfg = await apiFetch('/api/v1/pool/config');
+                    configReachable = true;
                     if (cfg && cfg.pool_address) {
                         minerAddress = cfg.pool_address;
                         var a = document.getElementById('minerAddress');
@@ -76,15 +144,64 @@
                     msg = '⏳ <b>Starting the BCH2 node…</b> first launch can take a minute.';
                 } else if (!minerAddress) {
                     msg = '✅ <b>Node synced.</b> Now set your <a href="/settings" style="color:inherit;font-weight:600;text-decoration:underline">payout address</a> in Settings to start mining.';
-                } else if (minerHashing) {
-                    tone = 'green';
-                    msg = '⛏️ <b>Mining</b> — node synced and a miner is connected. Good luck!';
                 } else {
-                    tone = 'green';
-                    msg = '✅ <b>Node synced — ready to mine.</b> Point a miner at <b>port 3333</b> (this PC: 127.0.0.1:3333 · a Bitaxe: your PC LAN IP, port 3333).';
+                    // Node synced and an address is set -- but neither fact proves the
+                    // mining service is actually handing out work. Ask it. A miner that
+                    // is connected and receiving nothing is the one failure that used to
+                    // render here as a cheerful "ready to mine".
+                    let ms = null;
+                    try {
+                        ms = await apiFetch('/api/v1/mining-status');
+                        lastMiningStatus = ms;
+                        lastMiningStatusAt = Date.now();
+                    } catch (e) {
+                        // Stale status must not keep driving the Workers tile.
+                        lastMiningStatus = null;
+                    }
+                    if (ms && ms.reason === 'no_miners') {
+                        // Not a fault: the node is synced and work is ready, there is
+                        // simply nothing attached. Rendering this in the alarming
+                        // "Not mining" style would cry wolf on an ordinary idle install,
+                        // but it must NOT be dressed up as mining either -- the previous
+                        // code said "a miner is connected" in exactly this state.
+                        tone = 'gold';
+                        msg = '⏸️ <b>No miner connected.</b> Node synced and work is ready — point a miner at <b>port ' + stratumHostHint() + '</b>.';
+                    } else if (ms && ms.mining === false && ms.message) {
+                        // escapeHtml: ms.message can carry the node's raw JSON-RPC error
+                        // text, which is the one dynamic string on this page that does not
+                        // originate here.
+                        msg = '⚠️ <b>Not mining.</b> ' + escapeHtml(ms.message);
+                        // The detail line must agree with the message above it. "receiving no
+                        // work" is only true when the node has stopped producing jobs; appending
+                        // it to no_shares -- whose message says the miner IS receiving work and
+                        // not submitting -- contradicted itself inside one banner. Seen on
+                        // mainnet: "connected and receiving work but has not submitted an
+                        // accepted share recently. 1 miner(s) connected and receiving no work."
+                        if (ms.reason === 'miners_refused' && ms.connections > 0) {
+                            msg += '<div style="margin-top:6px">' + Number(ms.connections) + ' connection(s), 0 authorized.</div>';
+                        } else if (ms.connections > 0 && (ms.reason === 'stale_template' || ms.reason === 'no_template_yet')) {
+                            msg += '<div style="margin-top:6px">' + Number(ms.connections) + ' miner(s) connected, but the node is not producing work for them.</div>';
+                        } else if (ms.connections > 0 && ms.reason === 'no_shares') {
+                            msg += '<div style="margin-top:6px">' + Number(ms.connections) + ' miner(s) connected and receiving work.</div>';
+                        } else if (ms.connections > 0) {
+                            msg += '<div style="margin-top:6px">' + Number(ms.connections) + ' miner(s) connected.</div>';
+                        }
+                    } else if (ms && ms.mining === true && Number(ms.authorized) > 0) {
+                        tone = 'green';
+                        msg = '⛏️ <b>Mining</b> — node synced, ' + Number(ms.authorized) + ' miner(s) authorized and submitting shares. Good luck!';
+                    } else if (minerHashing) {
+                        // Reached only when mining-status is unavailable. All this branch
+                        // actually knows is that a worker submitted a share recently --
+                        // it says nothing about connections, so it must not claim one.
+                        tone = 'green';
+                        msg = '⛏️ <b>Mining</b> — a worker is submitting shares. Good luck!';
+                    } else {
+                        tone = 'green';
+                        msg = '✅ <b>Node synced — ready to mine.</b> Point a miner at <b>port ' + stratumHostHint() + '</b>.';
+                    }
                 }
             } catch (e) {
-                if (!minerAddress) msg = '⚙️ Set your payout address in Settings to mine.';
+                if (!minerAddress) msg = (configReachable ? '⚙️ ' : '⚠️ ') + noAddressNotice(false);
             }
             if (!msg) { el.style.display = 'none'; return; }
             var c = (tone === 'green')
@@ -126,9 +243,26 @@
                 document.getElementById('immatureBalance').textContent = formatBCH2(data.immatureBalance || 0, 2);
                 document.getElementById('hashrate5m').textContent = formatHashrate((data.hashrate5m || 0) * 1e12);
                 document.getElementById('hashrate60m').textContent = formatHashrate((data.hashrate60m || 0) * 1e12);
-                document.getElementById('workers').textContent = formatNumber(data.workers || 0);
+                // Never data.workers: that counts every worker ever seen. The stats manager
+                // never deletes from its map (SetWorkerOffline and MarkStaleWorkersOffline
+                // only flip a bool), so it stays >= 1 for the life of the stratum process --
+                // an unplugged rig, a rig moved to another pool, a renamed worker or
+                // rotating rental worker names all left the tile reading 1 next to a
+                // hashrate of 0, while the same app answered 0 on /api/v1/stats.
+                //
+                // Prefer the stratum's LIVE authorized count over data.onlineWorkers.
+                // "online" there means "submitted a share in the last 5 minutes", so a rig
+                // that is switched off still counts for five minutes -- underneath a banner
+                // correctly reporting no miner connected. Both were true; together they read
+                // as a contradiction, and on a solo dashboard "Workers" means what is
+                // attached right now.
+                document.getElementById('workers').textContent = formatNumber(workersConnectedNow(data));
                 document.getElementById('validShares').textContent = formatNumber(data.validShares || 0);
-                document.getElementById('roundShares').textContent = formatNumber(data.validShares || 0);
+                // roundShares, NOT validShares. validShares is all-time and is never reset --
+                // it is the same field the "Valid Shares" tile uses, so the two tiles were
+                // byte-identical always, and this one sat inside the Round Effort card next
+                // to a Current Effort and Best Difficulty that the round reset HAD cleared.
+                document.getElementById('roundShares').textContent = formatNumber(data.roundShares || 0);
                 document.getElementById('bestDiff').textContent = formatDiff(data.bestDiff || 0);
                 const rejectRate = data.invalidShares > 0 ?
                     ((data.invalidShares / (data.validShares + data.invalidShares)) * 100).toFixed(2) : '0.00';
@@ -150,7 +284,13 @@
                 }
                 const hashrate = data.hashrate5m || 0;
                 currentHashrateTH = hashrate;
-                minerHashing = hashrate > 0 || (data.workers || 0) > 0;
+                // onlineWorkers, NOT workers: `workers` counts every worker ever seen and is
+                // never pruned, so it stays >= 1 for the life of the stratum process. Using it
+                // made the "a miner is connected" banner latch on permanently after a rig was
+                // unplugged -- and because the accurate rung above requires authorized > 0,
+                // this branch is only ever REACHED when nothing is connected, so it could
+                // never once describe a live miner correctly.
+                minerHashing = hashrate > 0 || (data.onlineWorkers || 0) > 0;
                 if (hashrate > 0 && networkDiff > 0) {
                     const hashesPerSecond = hashrate * 1e12;
                     const hashesNeeded = networkDiff * 4294967296;
@@ -177,7 +317,7 @@
 
         async function fetchWorkers() {
             const tbody = document.getElementById('workersTable');
-            if (!minerAddress) { tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state">Set your payout address in Settings to begin.</div></td></tr>'; return; }
+            if (!minerAddress) { tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state">' + escapeHtml(noAddressNotice(true)) + '</div></td></tr>'; return; }
             try {
                 const data = await apiFetch('/api/v1/miners/' + encodeURIComponent(minerAddress) + '/workers');
                 if (!data.workers || data.workers.length === 0) {
@@ -186,7 +326,7 @@
                 }
                 tbody.innerHTML = data.workers.map(w => `
                     <tr>
-                        <td><span class="status-dot ${w.online ? 'online' : 'offline'}" aria-hidden="true"></span>${sanitizeHTML(w.name || 'default')}</td>
+                        <td><span class="status-dot ${w.online ? 'online' : 'offline'}" aria-hidden="true"></span>${sanitizeHTML(w.name || 'default')}${w.online ? '' : ' <span style="color:var(--text-secondary);font-size:0.85em">(offline)</span>'}</td>
                         <td style="color:var(--gold);font-weight:600">${formatNumber(w.blocksFound || 0)}</td>
                         <td>${formatHashrate((w.hashrate5m || 0) * 1e12)}</td>
                         <td>${formatHashrate((w.hashrate60m || 0) * 1e12)}</td>
@@ -202,7 +342,7 @@
 
         async function fetchBlocks() {
             const tbody = document.getElementById('blocksTable');
-            if (!minerAddress) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state">Set your payout address in Settings to begin.</div></td></tr>'; return; }
+            if (!minerAddress) { tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state">' + escapeHtml(noAddressNotice(true)) + '</div></td></tr>'; return; }
             try {
                 const data = await apiFetch('/api/v1/miners/' + encodeURIComponent(minerAddress) + '/solo-blocks');
                 if (!data.blocks || data.blocks.length === 0) {
@@ -212,12 +352,26 @@
                     document.getElementById('totalEarned').textContent = 'Total: 0 BCH2';
                 } else {
                     const sorted = data.blocks.slice().sort((a, b) => (b.time || 0) - (a.time || 0));
-                    minerBlocksCount = sorted.length;
+                    // data.total is the BCH2 count the API already computed. sorted.length
+                    // merged in the merge-mined 1175 rows, so the tile read 10 while the
+                    // same page's own workers table and /api/v1/stats both said 7.
+                    minerBlocksCount = (data.total != null) ? data.total : sorted.filter(b => b.coin !== '1175').length;
                     var confirmedText = typeof PT !== 'undefined' && PT.p_status_confirmed ? PT.p_status_confirmed : 'Confirmed';
                     var pendingText = typeof PT !== 'undefined' && PT.p_status_pending ? PT.p_status_pending : 'Pending';
                     var processingText = typeof PT !== 'undefined' && PT.p_status_processing ? PT.p_status_processing : 'Processing';
                     let bch2Reward = 0, esfReward = 0, esfCount = 0;
-                    tbody.innerHTML = sorted.slice(0, 20).map(b => {
+                    // Sum over EVERY row the API returned, not just the 20 rendered below.
+                    // The total was accumulated inside the .slice(0,20).map(), while the
+                    // count printed beside it is the server-side figure -- so past 20 rows
+                    // (about 10 BCH2 blocks, since merge-mining adds a 1175 row to each)
+                    // the page showed a total that silently stopped growing.
+                    const shownLimit = 20;
+                    for (const b of sorted) {
+                        if (b.status === 'orphaned') continue;   // paid nothing
+                        const r = (b.reward != null ? b.reward : (b.coin === '1175' ? 0 : 50));
+                        if (b.coin === '1175') { esfReward += r; esfCount++; } else { bch2Reward += r; }
+                    }
+                    tbody.innerHTML = sorted.slice(0, shownLimit).map(b => {
                         const is1175 = b.coin === '1175';
                         const coinBadge = is1175
                             ? '<span style="background:rgba(224,179,65,0.15);color:#e0b341;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700">1175</span>'
@@ -231,7 +385,21 @@
                         else blockCell = `<a href="https://explorer.bch2.org/block/${safeHash}" target="_blank" rel="noopener noreferrer" class="hash-link" title="View this block on the BCH2 explorer">${truncateHash(safeHash, 8, 4)}</a>`;
                         // Payout cell: BCH2 links to the tx; 1175 shows status text (BCH2 explorer would be wrong).
                         let payoutCell;
-                        if (is1175) {
+                        // An orphaned block paid nothing: the chain discarded it. It used to
+                        // render as found and "Paid by coinbase" and count toward the totals,
+                        // because the renderer never looked at b.status and treated every
+                        // 1175 row as paid unconditionally.
+                        const isOrphaned = b.status === 'orphaned';
+                        // Solo rewards are paid by the block's OWN coinbase on both chains, so
+                        // there is no payout transaction to wait for and no "Processing" state
+                        // to pass through. Without this every solo block sat at Pending, then
+                        // Processing, forever -- next to a Total Paid that already counted it.
+                        const paidByCoinbase = !isOrphaned && (b.payoutTxid === 'coinbase-direct' || is1175);
+                        if (isOrphaned) {
+                            payoutCell = '<span style="color:var(--red)" title="This block was superseded on the chain and paid nothing">Orphaned</span>';
+                        } else if (paidByCoinbase) {
+                            payoutCell = '<span style="color:var(--bch-green)" title="Paid directly by this block\u2019s coinbase — there is no separate payout transaction">Paid by coinbase</span>';
+                        } else if (is1175) {
                             payoutCell = b.confirmed ? '<span style="color:var(--gold)">' + processingText + '</span>' : '<span style="color:var(--text-secondary)">' + pendingText + '</span>';
                         } else if (safeTxid) {
                             payoutCell = `<a href="https://explorer.bch2.org/tx/${safeTxid}" target="_blank" rel="noopener noreferrer" class="hash-link" style="color:var(--bch-green)">${truncateHash(safeTxid, 6, 4)}</a>`;
@@ -241,7 +409,6 @@
                             payoutCell = '<span style="color:var(--text-secondary)">' + pendingText + '</span>';
                         }
                         const reward = (b.reward != null ? b.reward : (is1175 ? 0 : 50));
-                        if (is1175) { esfReward += reward; esfCount++; } else { bch2Reward += reward; }
                         const rewardDisplay = formatBCH2(reward, is1175 ? 4 : 2) + (is1175 ? ' ESF' : ' BCH2');
                         return `
                         <tr>
@@ -255,8 +422,9 @@
                         </tr>
                     `}).join("");
                     document.getElementById('blocksFound').textContent = formatNumber(minerBlocksCount);
-                    let totalStr = 'Total: ' + formatBCH2(bch2Reward, 2) + ' BCH2';
-                    if (esfCount > 0) totalStr += ' + ' + formatBCH2(esfReward, 4) + ' ESF';
+                    let totalStr = 'Total: ' + formatBCH2(bch2Reward, 8) + ' BCH2';
+                    if (esfCount > 0) totalStr += ' + ' + formatBCH2(esfReward, 8) + ' ESF';
+                    if (sorted.length > shownLimit) totalStr += ' (latest ' + shownLimit + ' shown)';
                     document.getElementById('totalEarned').textContent = totalStr;
                 }
                 updateAvgEffort(data.blocks || []);
@@ -268,21 +436,46 @@
 
         async function fetchPayouts() {
             const tbody = document.getElementById("payoutsTable");
-            if (!minerAddress) { tbody.innerHTML = '<tr><td colspan="4"><div class="empty-state">Set your payout address in Settings to begin.</div></td></tr>'; return; }
+            if (!minerAddress) { tbody.innerHTML = '<tr><td colspan="4"><div class="empty-state">' + escapeHtml(noAddressNotice(true)) + '</div></td></tr>'; return; }
             try {
                 const data = await apiFetch("/api/v1/miners/" + encodeURIComponent(minerAddress) + "/solo-payouts");
                 document.getElementById("payoutCount").textContent = "(" + formatNumber(data.total || 0) + ")";
-                document.getElementById("totalPaidAmount").textContent = formatNumber(data.totalPaid || 0);
+                // formatBCH2, not formatNumber. formatNumber is toLocaleString(), which caps
+                // at 3 fraction digits and ROUNDS: 200.99999999 rendered as "201". On mainnet
+                // a coinbase is subsidy plus fees, so this figure essentially always has 8
+                // decimals -- and it is the one number a user checks against their wallet.
+                document.getElementById("totalPaidAmount").textContent = formatBCH2(data.totalPaid || 0, 8);
                 if (!data.payouts || data.payouts.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="4"><div class="empty-state" data-i18n="p_solo_no_payouts">' + (typeof PT !== 'undefined' && PT.p_solo_no_payouts ? PT.p_solo_no_payouts : 'No payouts yet') + '</div></td></tr>';
                     return;
                 }
                 tbody.innerHTML = data.payouts.slice(0, 20).map(p => {
                     const safeTxid = isValidBlockHash(p.txid) ? p.txid : '';
+                    // A solo reward is paid by the block's own coinbase, so its "txid" is the
+                    // literal 'coinbase-direct' rather than a 64-hex hash. Falling through to
+                    // the hash check rendered every settled solo payout as "Pending" forever,
+                    // directly beside a "Total Paid" that already counted it.
+                    const paidByCoinbase = p.txid === 'coinbase-direct';
+                    // An orphaned block's reward is VOID -- it was never paid and never will
+                    // be. It reaches here with confirmed=false and no real txid, exactly like
+                    // a payout still on its way, so without reading the status it rendered as
+                    // "Pending <amount>": a payment that will never arrive, shown as one that
+                    // is coming. The blocks table on this same page already says "Orphaned".
+                    const orphaned = p.status === 'orphaned';
+                    const statusCell = orphaned
+                        ? '<span style="color:var(--red)" title="This block was superseded on the chain and paid nothing">Orphaned</span>'
+                        : (safeTxid
+                            ? `<a href="https://explorer.bch2.org/tx/${safeTxid}" target="_blank" rel="noopener noreferrer" class="hash-link" style="color:var(--gold)">${truncateHash(safeTxid, 8, 4)}</a>`
+                            : (paidByCoinbase
+                                ? '<span style="color:var(--bch-green)">Paid by coinbase</span>'
+                                : (typeof PT !== 'undefined' && PT.p_status_pending ? PT.p_status_pending : 'Pending')));
+                    const amountStyle = orphaned
+                        ? 'color:var(--text-secondary);text-decoration:line-through'
+                        : 'color:var(--bch-green)';
                     return `
                     <tr>
-                        <td>${safeTxid ? `<a href="https://explorer.bch2.org/tx/${safeTxid}" target="_blank" rel="noopener noreferrer" class="hash-link" style="color:var(--gold)">${truncateHash(safeTxid, 8, 4)}</a>` : (typeof PT !== 'undefined' && PT.p_status_pending ? PT.p_status_pending : 'Pending')}</td>
-                        <td style="color:var(--bch-green)">${formatBCH2(p.amount || 0, 2)} BCH2</td>
+                        <td>${statusCell}</td>
+                        <td style="${amountStyle}">${formatBCH2(p.amount || 0, 2)} BCH2</td>
                         <td>${formatNumber(p.blocks || 0)}</td>
                         <td>${timeAgo(p.paidAt)}</td>
                     </tr>
@@ -336,10 +529,11 @@
             if (!minerAddress) {
                 try {
                     const cfg = await apiFetch('/api/v1/pool/config');
+                    configReachable = true;
                     if (cfg && cfg.pool_address) minerAddress = cfg.pool_address;
                 } catch (e) {}
                 var _el = document.getElementById('minerAddress');
-                if (_el) _el.textContent = minerAddress || '(configure payout address)';
+                if (_el) _el.textContent = minerAddress || (configReachable ? '(configure payout address)' : '(unavailable — cannot reach Forge Solo)');
             }
             await updateStatusBanner();
             fetchStats();
