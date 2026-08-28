@@ -86,8 +86,6 @@ stratum:
 # the installer opens no rule for that port, so a home box would bind what nothing reaches.
 stratum_rental:
   enabled: false
-stratumv2:
-  enabled: false
 node:
   host: "127.0.0.1"
   port: ` + bch2RPC + `
@@ -101,7 +99,6 @@ mergemining:
     port: ` + aux1175RPC + `
     user: "forge1175"
     pass: "` + sec.AuxPass + `"
-    wallet: "pool"
 logging:
   level: "info"
   format: "json"
