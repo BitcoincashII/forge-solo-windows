@@ -7,7 +7,7 @@
 
         let hashrateChart;
         let hashrateHistory = [];
-        let networkDiff = 1;
+        let networkDiff = 0;   // 0 until a real value arrives; last-good is then held across polls
         let nodeSynced = false;   // set by updateStatusBanner; gates network stats during IBD
         let minerHashing = false; // set by fetchMinerData; true once a worker is actually hashing
         let minerBlocksCount = 0;
@@ -68,7 +68,7 @@
                 nodeSynced = (s.status === 'synced');
                 if (s.status === 'syncing') {
                     const pct = (s.progress != null ? (s.progress * 100) : 0);
-                    msg = '⏳ <b>BCH2 node syncing — ' + pct.toFixed(2) + '%</b> (block ' + (s.blocks || 0) + ' / ' + (s.headers || 0) + '). You can mine once it reaches 100%.'
+                    msg = '⏳ <b>BCH2 node syncing — ' + pct.toFixed(2) + '%</b> (block ' + (Number(s.blocks) || 0) + ' / ' + (Number(s.headers) || 0) + '). You can mine once it reaches 100%.'
                         + '<div style="margin-top:7px;height:7px;background:rgba(255,255,255,0.18);border-radius:4px;overflow:hidden">'
                         + '<div style="height:100%;width:' + pct.toFixed(1) + '%;background:#0ac18e;transition:width .6s"></div></div>';
                     if (!minerAddress) msg += '<div style="height:8px"></div>⚙️ Meanwhile, set your <a href="/settings" style="color:inherit;font-weight:600;text-decoration:underline">payout address</a> in Settings.';
@@ -98,12 +98,16 @@
         async function fetchStats() {
             try {
                 const data = await apiFetch('/api/v1/stats');
-                networkDiff = data.networkDifficulty || 1;
+                // Keep the last good network difficulty. A transient node-RPC hiccup makes the API
+                // return 0 for a poll; never clobber a good tile with 0 (that's the "tiles flash 0" bug).
+                if (data.networkDifficulty > 0) networkDiff = data.networkDifficulty;
                 // Until the node reaches the chain tip, getdifficulty/getnetworkhashps report the
                 // value at the CURRENT (low) sync height — wildly off — so show "syncing…" instead.
                 if (nodeSynced) {
-                    document.getElementById('networkDiff').textContent = formatDiff(networkDiff);
-                    document.getElementById('networkHashrate').textContent = data.networkHashrate ? formatHashrate(data.networkHashrate) : '--';
+                    // Only update a tile when this poll actually carried a value; otherwise leave the
+                    // last good reading on screen instead of blanking it to 0 / "--".
+                    if (networkDiff > 0) document.getElementById('networkDiff').textContent = formatDiff(networkDiff);
+                    if (data.networkHashrate > 0) document.getElementById('networkHashrate').textContent = formatHashrate(data.networkHashrate);
                 } else {
                     document.getElementById('networkDiff').textContent = 'syncing…';
                     document.getElementById('networkHashrate').textContent = 'syncing…';
@@ -337,7 +341,7 @@
                 var _el = document.getElementById('minerAddress');
                 if (_el) _el.textContent = minerAddress || '(configure payout address)';
             }
-            updateStatusBanner();
+            await updateStatusBanner();
             fetchStats();
             fetchMinerData();
             fetchWorkers();

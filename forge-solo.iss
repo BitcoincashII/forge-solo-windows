@@ -1,7 +1,7 @@
 ; Forge Solo — single-exe Windows installer. Bundles the launcher, stratum/api services,
 ; BCH2 + 1175 nodes, portable PostgreSQL, and the dashboard. Per-user install (no admin).
 #define MyAppName "Forge Solo"
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "1.0.8"
 #define MyAppPublisher "BCH2 Team"
 #define MyAppURL "https://github.com/BitcoincashII/forge-solo"
 #define MyAppExe "forge-solo.exe"
