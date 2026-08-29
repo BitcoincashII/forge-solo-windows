@@ -110,8 +110,14 @@ jobs:
           cp -a /tmp/pg/pgsql/bin /tmp/pg/pgsql/lib /tmp/pg/pgsql/share pgsql/
           test -f pgsql/bin/postgres.exe
 
+      # The Inno Setup image runs as uid 1000 while the runner's workspace is owned by uid
+      # 1001, so the container cannot create its output here and the compile dies with
+      # "Access denied". Only the directory itself needs to be writable -- the inputs are
+      # world-readable already. This does not reproduce locally, where the checkout happens
+      # to be uid 1000 too.
       - name: Compile the installer
         run: |
+          chmod a+w .
           docker run --rm -v "$PWD":/work amake/innosetup \
             /DMyAppVersion=${{ steps.ver.outputs.version }} forge-solo.iss
           test -f "ForgeSolo-Setup-${{ steps.ver.outputs.version }}.exe"
