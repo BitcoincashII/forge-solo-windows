@@ -52,6 +52,12 @@ jobs:
         with:
           go-version-file: app/go.mod
 
+      # A tag build takes the app from main, which moves. Record the exact commit so the
+      # release says what it was built from rather than leaving it to be inferred later.
+      - name: Record the app commit
+        id: app
+        run: echo "sha=$(cd app && git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Resolve the version being built
         id: ver
         run: |
@@ -176,6 +182,19 @@ jobs:
         run: |
           SETUP="ForgeSolo-Setup-${{ steps.ver.outputs.version }}.exe"
           sha256sum "$SETUP" | tee SHA256SUMS
+          cat > /tmp/notes.md <<NOTE
+          Built and signed by CI from a clean runner.
+
+          | | |
+          |---|---|
+          | Services built from | \`BitcoincashII/forge-solo@${{ steps.app.outputs.sha }}\` |
+          | BCH2 node | ${BCH2_VERSION} |
+          | 1175 node | ${ESF_VERSION} |
+          | PostgreSQL | ${PG_VERSION} |
+
+          Every bundled component is fetched during the build and sha256-verified.
+          \`SHA256SUMS\` below covers the installer itself.
+          NOTE
           gh release create "${GITHUB_REF_NAME}" "$SETUP" SHA256SUMS \
             --title "Forge Solo ${{ steps.ver.outputs.version }}" \
-            --generate-notes
+            --notes-file /tmp/notes.md
