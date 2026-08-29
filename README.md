@@ -31,6 +31,11 @@ Fixed, because the installer's firewall rules and the miner URL you type must ma
 
 Mining from the same PC (`127.0.0.1:3333`) needs no firewall rule at all.
 
+The installer's rules open these ports on **this machine's** firewall. Nothing is opened on
+your router: both nodes run with `upnp=0` and `natpmp=0`, so the app never reconfigures your
+network on its own. Outbound peering works regardless; to *accept* inbound peers, forward 8339
+and 25360 yourself.
+
 Everything else — PostgreSQL, both node RPCs, ZMQ, the stratum's internal stats listener, and
 the api — binds a **dynamically chosen loopback port** (`pickPort`) so it can never collide with
 other software or land in a Windows reserved/excluded range. Those ports are picked in `main()`
@@ -45,8 +50,13 @@ before anything binds, and every config and env var is regenerated from them on 
 
   Get the "Windows x86-64" binaries zip from
   <https://www.enterprisedb.com/download-postgresql-binaries>. The currently bundled build is
-  **16.4**. Stay on 16.x: a PostgreSQL data directory is bound to its major version, so shipping
-  17.x would leave every existing install unable to start its database.
+  **16.10**. Only `bin/`, `lib/` and `share/` are kept (the full archive is ~2.5x larger and
+  the rest is pgAdmin and headers we never invoke).
+
+  Stay on 16.x: a PostgreSQL data directory is bound to its major version, so shipping 17.x
+  would leave every existing install unable to start its database. Moving *within* 16.x is
+  safe and is how this gets patched -- 16.4 shipped for a long time and was roughly two years
+  of minor releases behind, which is exactly the drift this note exists to prevent.
 
 ## Build
 Requires Go (for the three executables) and Docker (only to run Inno Setup, which has no native
@@ -78,7 +88,16 @@ The installer is written to `ForgeSolo-Setup-<version>.exe`; the version lives i
   Defender exclusion for `%APPDATA%\ForgeSolo`, which otherwise gets rescanned on every
   blockchain/DB write — the main cause of disk thrash on a laptop. The file copy itself is a
   per-user install and needs no admin rights.
-- **Config and secrets** live under `%APPDATA%\ForgeSolo`. `config.yaml` is regenerated on every
+- **Startup** — mining runs only while the app is open. The installer offers an opt-in
+  "Start Forge Solo when I sign in" (per-user `HKCU` entry, removed with the app); without it,
+  a reboot silently stops mining until someone launches it again.
+- **Uninstall** — asks whether to delete `%APPDATA%\ForgeSolo`. Answering no keeps the chain
+  data for a reinstall; answering yes also removes the file holding this install's node and
+  database passwords. It is all-or-nothing on purpose: deleting only the secrets would leave a
+  database the app can no longer open.
+- **Config and secrets** live under `%APPDATA%\ForgeSolo`, which the launcher locks to the
+  current user with `icacls` on every start. Go's `0600` file mode does nothing on Windows, so
+  without that the folder is protected only by whatever it inherits. `config.yaml` is regenerated on every
   launch (so port changes always take effect); it mirrors the app's
   `docker/stratum/config.template.yaml`, and keys the stratum does not read are ignored silently,
   so keep the two in step.

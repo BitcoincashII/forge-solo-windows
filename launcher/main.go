@@ -78,6 +78,31 @@ func hiddenPrio(extraFlags uint32, name string, args ...string) *exec.Cmd {
 	return c
 }
 func hidden(name string, args ...string) *exec.Cmd { return hiddenPrio(0, name, args...) }
+
+// hiddenSystem runs a command from PATH rather than from the install directory.
+func hiddenSystem(name string, args ...string) *exec.Cmd {
+	c := exec.Command(name, args...)
+	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	return c
+}
+
+// restrictDataDir locks the data directory to this user.
+//
+// secrets.env holds both node RPC passwords, the database password and the internal API
+// token, and it is written with mode 0600 -- which Windows ignores, because Go's permission
+// bits do not map to an ACL. Protection therefore comes from whatever %APPDATA% happens to
+// carry, and the installer also adds a Defender exclusion for this same folder. Make the
+// intent explicit instead of inheriting it: break inheritance and grant this user alone.
+//
+// Best effort. If icacls is unavailable or refuses, the app still runs -- the folder is then
+// no worse protected than it was before.
+func restrictDataDir(dir string) {
+	user := os.Getenv("USERNAME")
+	if user == "" {
+		return
+	}
+	_ = hiddenSystem("icacls", dir, "/inheritance:r", "/grant:r", user+":(OI)(CI)F").Run()
+}
 func run(key string, c *exec.Cmd) error {
 	if err := c.Start(); err != nil {
 		return err
@@ -136,6 +161,7 @@ func main() {
 	installDir = filepath.Dir(exe)
 	dataDir = filepath.Join(os.Getenv("APPDATA"), "ForgeSolo")
 	md(dataDir)
+	restrictDataDir(dataDir)
 	// Assign collision-proof loopback ports before any service binds. Distinct 300-wide
 	// windows keep the services from picking the same port as each other.
 	pgPort = pickPort(30000)

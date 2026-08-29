@@ -39,17 +39,20 @@ func setupSecrets() {
 func writeConfigs() {
 	md(dpath("bch2"))
 	md(dpath("elevenseventyfive"))
-	// listen + upnp/natpmp/discover so the node accepts incoming peers (router permitting);
+	// listen so the node ACCEPTS incoming peers once the router forwards the port. UPnP and
+	// NAT-PMP are off: opening a port on someone's router is a change to their network, and
+	// it is not this installer's to make silently. The Umbrel build never did it either, and
+	// Bitcoin Core ships both off. Outbound peering is unaffected; inbound needs a forward.
 	// dbcache/par/maxconnections keep it light on a laptop. writeAlways so upgrades apply.
 	writeAlways(dpath("bch2", "bch2.conf"),
 		"server=1\nlisten=1\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\nrpcport="+bch2RPC+
 			"\nrpcuser=forge\nrpcpassword="+sec.BCH2Pass+"\nport="+bch2P2P+"\nprune=2000\n"+
-			"upnp=1\nnatpmp=1\ndiscover=1\ndbcache=300\npar=1\nmaxconnections=40\n"+
+			"upnp=0\nnatpmp=0\ndiscover=1\ndbcache=300\npar=1\nmaxconnections=40\n"+
 			"zmqpubhashblock=tcp://127.0.0.1:"+bch2ZMQ+"\nzmqpubrawblock=tcp://127.0.0.1:"+bch2ZMQ+"\ndnsseed=1\n")
 	writeAlways(dpath("elevenseventyfive", "1175.conf"),
 		"server=1\nlisten=1\nrpcbind=127.0.0.1\nrpcallowip=127.0.0.1\nrpcport="+aux1175RPC+
 			"\nrpcuser=forge1175\nrpcpassword="+sec.AuxPass+"\nport="+aux1175P2P+"\nprune=2000\n"+
-			"upnp=1\nnatpmp=1\ndiscover=1\ndbcache=300\npar=1\nmaxconnections=40\ndnsseed=1\n"+
+			"upnp=0\nnatpmp=0\ndiscover=1\ndbcache=300\npar=1\nmaxconnections=40\ndnsseed=1\n"+
 			"addnode=213.181.112.83\naddnode=46.7.7.113\naddnode=93.127.117.218\n")
 	// writeAlways so a port change (e.g. moving the 1175 RPC off a Windows-blocked port)
 	// propagates to the stratum's merge-mining config on upgrade. Fully generated file.
@@ -72,6 +75,7 @@ stratum:
   host: "0.0.0.0"
   port: ` + minerPort + `
   max_connections: 256
+  max_connections_per_ip: 128
   max_shares_per_second: 100
   extranonce1_size: 4
   extranonce2_size: 8

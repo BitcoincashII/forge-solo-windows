@@ -31,6 +31,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
+; Mining stops when the app is closed, and nothing restarted it after a reboot -- a machine
+; that rebooted overnight simply stopped earning until someone noticed. Opt-in, per-user
+; (HKCU needs no admin), and removed with the app.
+Name: "startup"; Description: "Start Forge Solo when I sign in"; GroupDescription: "Startup:"; Flags: unchecked
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "ForgeSolo"; ValueData: """{app}\{#MyAppExe}"""; Flags: uninsdeletevalue; Tasks: startup
 
 [Files]
 Source: "bin\*"; DestDir: "{app}"; Flags: ignoreversion
@@ -86,5 +93,29 @@ begin
       'netsh advfirewall firewall delete rule name="Forge Solo 1175 P2P (25360)" & ' +
       'powershell -NoProfile -Command "Remove-MpPreference -ExclusionPath ''' + DataDir + ''' -ErrorAction SilentlyContinue"';
     ShellExec('runas', ExpandConstant('{cmd}'), Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+
+  // Uninstalling used to leave the data folder untouched, and that folder holds secrets.env
+  // -- both node RPC passwords, the database password and the internal API token -- as well
+  // as the chain data and your payout address. Silently leaving credentials behind is not a
+  // decision to make on someone's behalf, so ask.
+  //
+  // All or nothing on purpose: deleting only secrets.env would regenerate a new database
+  // password against the existing pgdata on the next install, and the app could no longer
+  // open its own database.
+  if CurUninstallStep = usPostUninstall then
+  begin
+    DataDir := ExpandConstant('{userappdata}\ForgeSolo');
+    if DirExists(DataDir) then
+    begin
+      if MsgBox('Also delete Forge Solo''s data folder?' + #13#10#13#10 +
+                DataDir + #13#10#13#10 +
+                'It holds the downloaded BCH2 and 1175 blockchains, the database, your saved ' +
+                'payout address, and the file storing this install''s node and database ' +
+                'passwords.' + #13#10#13#10 +
+                'Choose No to keep it for a future reinstall.',
+                mbConfirmation, MB_YESNO) = IDYES then
+        DelTree(DataDir, True, True, True);
+    end;
   end;
 end;
