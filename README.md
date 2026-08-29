@@ -58,9 +58,32 @@ before anything binds, and every config and env var is regenerated from them on 
   safe and is how this gets patched -- 16.4 shipped for a long time and was roughly two years
   of minor releases behind, which is exactly the drift this note exists to prevent.
 
-## Build
-Requires Go (for the three executables) and Docker (only to run Inno Setup, which has no native
-Linux build). Both `stratum.exe` and `api.exe` come from the app repo; the launcher is built here.
+## Releases are built by CI
+
+Tagging `v*` runs `.github/workflows/release.yml`, which builds the whole installer on a clean
+runner and publishes a **single signed `ForgeSolo-Setup-<version>.exe`**. There is deliberately
+no second zip asset: two downloads means a user can pick the one that does not install.
+
+Everything inside the installer is fetched during that run and **sha256-verified fail-closed** --
+both node binaries from their own published releases, PostgreSQL from EnterpriseDB, and the three
+Go executables compiled from the app repo. So a release is reproducible from public sources
+rather than from whatever was on someone's laptop. Bumping any pinned version means bumping its
+hash in the same commit; the versions and hashes are the `env:` block at the top of the workflow.
+
+Signing uses `osslsigncode` inside the same Inno Setup container, from two repository secrets:
+
+| Secret | Contents |
+|---|---|
+| `WINDOWS_SIGNING_PFX_B64` | the PKCS#12 (`.pfx`) signing certificate, base64-encoded |
+| `WINDOWS_SIGNING_PASSWORD` | its export password |
+
+A tag build **fails** rather than publishing unsigned if the secret is missing. A manual
+`workflow_dispatch` run still builds without it, so the build itself can be tested. To encode the
+certificate: `base64 -w0 signing.pfx`.
+
+## Building locally
+Only needed to test a change before tagging; releases come from CI. Requires Go and Docker
+(Docker only to run Inno Setup, which has no native Linux build).
 
 ```sh
 # 1) app services, from a checkout of the forge-solo app at the release tag:
